@@ -2,13 +2,40 @@ name: cristaux-jewellery
 
 services:
   # ------------------------------------------------------------------
-  # Your application
+  # HTTP App replicas (A gets traffic via Envoy; B & C run but idle)
   # ------------------------------------------------------------------
-  app:
+  app-a:
     build: ./app
-    container_name: app
-    ports:
-      - "8000:8000"
+    container_name: app-a
+    environment:
+      - REPLICA_ID=A
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app-b:
+    build: ./app
+    container_name: app-b
+    environment:
+      - REPLICA_ID=B
+      - FAULT_DELAY_MS=${FAULT_DELAY_MS:-0.0}
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app-c:
+    build: ./app
+    container_name: app-c
+    environment:
+      - REPLICA_ID=C
     volumes:
       - ./data:/app/data
     logging:
@@ -18,16 +45,15 @@ services:
         max-file: "3"
 
   # ------------------------------------------------------------------
-  # gRPC Order Service (Part B)
+  # gRPC replicas (A gets traffic via Envoy; B & C run but idle)
   # ------------------------------------------------------------------
-  grpc-service:
+  grpc-a:
     build:
       context: .
       dockerfile: Dockerfile.grpc
-    container_name: grpc-service
-    ports:
-      - "50051:50051"   # gRPC (HTTP/2)
-      - "50052:50052"   # Prometheus /metrics (HTTP)
+    container_name: grpc-a
+    environment:
+      - REPLICA_ID=A
     volumes:
       - ./data:/app/data
     logging:
@@ -36,6 +62,62 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  grpc-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.grpc
+    container_name: grpc-b
+    environment:
+      - REPLICA_ID=B
+      - FAULT_DELAY_MS=${FAULT_DELAY_MS:-0.0}
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grpc-c:
+    build:
+      context: .
+      dockerfile: Dockerfile.grpc
+    container_name: grpc-c
+    environment:
+      - REPLICA_ID=C
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------------
+  # Envoy proxy
+  # ------------------------------------------------------------------
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    container_name: envoy
+    ports:
+      - "8080:8080"     # HTTP (routes to app-a)
+      - "50050:50050"   # gRPC (routes to grpc-a)
+      - "9901:9901"     # Admin / Prometheus scrape
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    command: ["/usr/local/bin/envoy", "-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    depends_on:
+      - app-a
+      - app-b
+      - app-c
+      - grpc-a
+      - grpc-b
+      - grpc-c
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ------------------------------------------------------------------
   # Metrics

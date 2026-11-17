@@ -3,31 +3,71 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  # Prometheus scraping itself - useful for checking Prometheus is alive.
   - job_name: prometheus
     static_configs:
       - targets: ["localhost:9090"]
 
-  # Your application.
-  - job_name: demo-app
+  # Scrape each HTTP app replica directly (NOT through Envoy)
+  - job_name: app-replica-a
     metrics_path: /metrics
     static_configs:
-      - targets: ["app:8000"]
+      - targets: ["app-a:8000"]
         labels:
-          service: demo-app
+          service: cristaux-app
+          replica: A
 
-  # Part C: gRPC Order Service metrics (grpc_calls_total, duration, in-flight).
-  - job_name: grpc-service
+  - job_name: app-replica-b
     metrics_path: /metrics
     static_configs:
-      - targets: ["grpc-service:50052"]
+      - targets: ["app-b:8000"]
         labels:
-          service: grpc-service
+          service: cristaux-app
+          replica: B
 
-  # Machine metrics: CPU, memory, disk, network.
+  - job_name: app-replica-c
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app-c:8000"]
+        labels:
+          service: cristaux-app
+          replica: C
+
+  # Scrape each gRPC replica directly (NOT through Envoy)
+  - job_name: grpc-replica-a
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["grpc-a:50052"]
+        labels:
+          service: cristaux-grpc
+          replica: A
+
+  - job_name: grpc-replica-b
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["grpc-b:50052"]
+        labels:
+          service: cristaux-grpc
+          replica: B
+
+  - job_name: grpc-replica-c
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["grpc-c:50052"]
+        labels:
+          service: cristaux-grpc
+          replica: C
+
+  # Envoy admin metrics (direct scrape, not through the balanced route)
+  - job_name: envoy
+    metrics_path: /stats/prometheus
+    static_configs:
+      - targets: ["envoy:9901"]
+        labels:
+          service: envoy
+
+  # Machine metrics
   - job_name: node-exporter
     static_configs:
       - targets: ["node-exporter:9100"]
         labels:
-          # Name the machine being measured - the assignment asks for this.
           machine: local-dev-host

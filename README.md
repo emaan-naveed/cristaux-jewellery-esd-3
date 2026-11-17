@@ -1,3 +1,111 @@
+# Cristaux Jewellery — Assignment 3: Load Balancing and Observability
+
+Enterprise luxury jewellery e-commerce application extending Assignment 1 and 2. Assignment 3 adds **Envoy Proxy (v1.31)** to distribute HTTP requests and gRPC calls across three scaled replicas (**A, B, and C**), with multi-replica observability in **Prometheus**, **Grafana**, and **Kibana**.
+
+Built with **FastAPI**, **gRPC**, **Envoy**, **SQLite (WAL mode)**, **Prometheus**, **Grafana**, **Filebeat**, **Elasticsearch**, and **Kibana**.
+
+---
+
+## Assignment 3 Architecture & Ingress Ports
+
+| Service / Ingress | Host Port | Protocol / Description |
+| :--- | :--- | :--- |
+| **Envoy HTTP Ingress** | `http://localhost:8080` | Reverse proxy forwarding HTTP calls (`/api/v1/...`) to backend app replicas |
+| **Envoy gRPC Ingress** | `localhost:50050` | Layer 7 HTTP/2 proxy multiplexing gRPC streams to backend gRPC replicas |
+| **Envoy Admin & Metrics** | `http://localhost:9901` | Envoy admin stats and Prometheus scrape endpoint (`/stats/prometheus`) |
+| **Grafana Dashboards** | `http://localhost:3000` | Auto-provisioned dashboard: *Cristaux - Assignment 3: Envoy & Replicas Baseline* (Login: `admin` / `admin`) |
+| **Prometheus Server** | `http://localhost:9090` | Telemetry TSDB directly scraping all 6 replicas (`app-a/b/c`, `grpc-a/b/c`) and Envoy |
+| **Kibana Log Search** | `http://localhost:5601` | Structured JSON log analytics (`app-logs-*`) correlating Envoy and replica logs |
+| **Elasticsearch** | `http://localhost:9200` | Log document store indexed by Filebeat |
+
+---
+
+## Assignment 3 Quick Start
+
+```powershell
+# 1. Start all 10 services (3 app replicas, 3 gRPC replicas, Envoy, monitoring)
+docker compose up -d --build
+
+# 2. Verify all containers are healthy
+docker compose ps
+
+# 3. Test Envoy ingress
+curl http://localhost:8080/api/v1/products
+
+# 4. Run the fixed-rate workload generator
+py -3 traffic_a3.py --http-rate 5.0 --grpc-rate 2.0 --duration 30.0
+```
+
+---
+
+## Experiment & Mode Switching (`switch_envoy.py`)
+
+Easily switch Envoy routing policies between assignment parts using the switcher script:
+
+```powershell
+# Part B: Baseline (Replica A receives 100%, Replicas B & C are idle)
+py -3 switch_envoy.py baseline
+
+# Part C: Equal-Weight Round Robin across Replicas A, B, C (33% : 33% : 33%)
+py -3 switch_envoy.py balanced
+
+# Part D Exp 1: Weighted Round Robin 2:1:1 (50% on A, 25% on B, 25% on C)
+py -3 switch_envoy.py weighted
+
+# Part D Exp 2: Least Request Load Balancing
+py -3 switch_envoy.py least-req
+
+# Part D Exp 3: Active Health Checking (automatic failure detection & recovery)
+py -3 switch_envoy.py healthcheck
+```
+
+---
+
+## Part D: Experiment Procedures & Recovery Commands
+
+### Experiment 1: Weighted Round Robin (2:1:1)
+```powershell
+py -3 switch_envoy.py weighted
+py -3 traffic_a3.py --http-rate 6.0 --grpc-rate 3.0 --duration 60.0
+# Observe: A receives 50% share, B and C receive 25% share each.
+```
+
+### Experiment 2: Least Request with Delay on B
+```powershell
+# Run 2A: Round Robin with B slow (200ms delay)
+$env:FAULT_DELAY_MS="200.0"; docker compose up -d app-b grpc-b
+py -3 switch_envoy.py balanced
+py -3 traffic_a3.py --http-rate 6.0 --grpc-rate 3.0 --duration 60.0
+# Note: B handles 33% of calls; client p95 blows out to >200ms.
+
+# Run 2B: Least Request with B slow (200ms delay)
+py -3 switch_envoy.py least-req
+py -3 traffic_a3.py --http-rate 6.0 --grpc-rate 3.0 --duration 60.0
+# Note: Envoy diverts calls away from slow B (share drops to <4%); client p95 recovers to ~12ms!
+
+# RECOVERY: Clear delay on B
+$env:FAULT_DELAY_MS="0.0"; docker compose up -d app-b grpc-b
+```
+
+### Experiment 3: Failure and Recovery with Active Health Checks
+```powershell
+py -3 switch_envoy.py healthcheck
+
+# Terminal 1: Start traffic
+py -3 traffic_a3.py --http-rate 6.0 --grpc-rate 3.0 --duration 60.0
+
+# Terminal 2: At t=20s, stop B
+docker stop app-b grpc-b
+
+# Terminal 2: At t=45s, restart B (RECOVERY)
+docker start app-b grpc-b
+# Note: Ejection occurs in 3.8s (4 errors), traffic shifts 50:50 to A/C, and B auto-recovers after 4.2s.
+```
+
+---
+
+# Previous Deliverables (Assignment 2 Archive)
+
 # Cristaux Jewellery — Assignment 2: HTTP APIs, gRPC, and Metrics
 
 An enterprise luxury jewellery e-commerce application extending the **Assignment 1** observability project. Assignment 2 adds **Part A** (REST principles + reliability practices for the HTTP API) and **Part B** (a standalone gRPC service for order lifecycle operations).

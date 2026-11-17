@@ -13,6 +13,7 @@ Part E: Fault Injection & Cardinality Explosion endpoints
 
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -56,6 +57,7 @@ except ImportError:
 # Structured Logging Setup
 # --------------------------------------------------------------------------
 SERVICE_NAME = "Cristaux Jewellery"
+REPLICA_ID = os.getenv("REPLICA_ID", "unknown")
 
 
 class JsonFormatter(logging.Formatter):
@@ -66,6 +68,7 @@ class JsonFormatter(logging.Formatter):
             )
             + f".{int(record.msecs):03d}Z",
             "service": SERVICE_NAME,
+            "replica_id": REPLICA_ID,
             "level": record.levelname,
             "message": record.getMessage(),
         }
@@ -115,6 +118,11 @@ PENDING_ORDERS_GAUGE = Gauge(
 ACTIVE_CARTS_GAUGE = Gauge(
     "jewellery_active_carts_count",
     "Number of currently active user shopping carts.",
+)
+
+HTTP_ACTIVE_REQUESTS = Gauge(
+    "http_active_requests",
+    "Number of HTTP requests currently in flight (active requests).",
 )
 
 # 3. HISTOGRAMS (Bucketed measurements for p95/p99 latency)
@@ -253,7 +261,7 @@ ORDERS: Dict[str, Dict] = {}       # order_id -> order details
 
 # Fault Injection State (Part E1 & Testing)
 FAULT_CONFIG = {
-    "delay_ms": 0.0,
+    "delay_ms": float(os.getenv("FAULT_DELAY_MS", "0.0")),
     "error_rate": 0.0,
     "status_code": 0  # e.g., 503 or 500
 }
@@ -368,6 +376,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def observability_middleware(request: Request, call_next):
     request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
     started = time.perf_counter()
+    HTTP_ACTIVE_REQUESTS.inc()
 
     # Fault injection: delay (Part E1)
     if FAULT_CONFIG.get("delay_ms", 0) > 0 and not request.url.path.startswith("/admin/fault"):
@@ -375,6 +384,7 @@ async def observability_middleware(request: Request, call_next):
 
     # Fault injection: status code simulation (e.g. 503 Service Unavailable)
     if FAULT_CONFIG.get("status_code", 0) > 0 and not request.url.path.startswith("/admin/fault"):
+        HTTP_ACTIVE_REQUESTS.dec()
         status_code = int(FAULT_CONFIG["status_code"])
         duration = time.perf_counter() - started
         HTTP_REQUEST_DURATION.labels(
@@ -389,6 +399,7 @@ async def observability_middleware(request: Request, call_next):
                     "path": request.url.path,
                     "status_code": status_code,
                     "duration_ms": round(duration * 1000, 2),
+                    "replica_id": REPLICA_ID,
                 }
             },
         )
@@ -418,10 +429,13 @@ async def observability_middleware(request: Request, call_next):
                     "status_code": status_code,
                     "duration_ms": round(duration * 1000, 2),
                     "error": str(exc),
+                    "replica_id": REPLICA_ID,
                 }
             },
         )
         raise exc
+    finally:
+        HTTP_ACTIVE_REQUESTS.dec()
 
     duration = time.perf_counter() - started
 
@@ -440,6 +454,7 @@ async def observability_middleware(request: Request, call_next):
                 "path": request.url.path,
                 "status_code": status_code,
                 "duration_ms": round(duration * 1000, 2),
+                "replica_id": REPLICA_ID,
             }
         },
     )

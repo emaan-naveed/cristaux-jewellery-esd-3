@@ -1,0 +1,238 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "title": "HTTP Request Rate by Replica (1m window)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": "Prometheus",
+      "description": "HTTP request rate per application replica (A, B, C) scraped directly by Prometheus.",
+      "targets": [
+        {
+          "expr": "sum by (replica) (rate(http_request_duration_seconds_count[1m]))",
+          "legendFormat": "HTTP Replica {{replica}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "req/s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "gRPC Request Rate by Replica (1m window)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": "Prometheus",
+      "description": "gRPC call rate per service replica (A, B, C) scraped directly on metrics port 50052.",
+      "targets": [
+        {
+          "expr": "sum by (replica) (rate(grpc_calls_total[1m]))",
+          "legendFormat": "gRPC Replica {{replica}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "req/s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "HTTP Traffic Share by Replica (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": "Prometheus",
+      "description": "Percentage share of total HTTP traffic handled by each replica. Baseline expectation: Replica A = 100%, B/C = 0%.",
+      "targets": [
+        {
+          "expr": "(sum by (replica) (rate(http_request_duration_seconds_count[1m])) / ignoring(replica) group_left sum(rate(http_request_duration_seconds_count[1m]))) * 100",
+          "legendFormat": "HTTP Replica {{replica}} Share (%)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "gray", "value": null },
+              { "color": "yellow", "value": 33.3 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "gRPC Traffic Share by Replica (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": "Prometheus",
+      "description": "Percentage share of total gRPC traffic handled by each replica. Baseline expectation: Replica A = 100%, B/C = 0%.",
+      "targets": [
+        {
+          "expr": "(sum by (replica) (rate(grpc_calls_total[1m])) / ignoring(replica) group_left sum(rate(grpc_calls_total[1m]))) * 100",
+          "legendFormat": "gRPC Replica {{replica}} Share (%)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "thresholdsStyle": { "mode": "line" }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "gray", "value": null },
+              { "color": "yellow", "value": 33.3 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "title": "HTTP Active Requests in Flight by Replica",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": "Prometheus",
+      "description": "Currently in-flight active HTTP requests on each replica.",
+      "targets": [
+        {
+          "expr": "sum by (replica) (http_active_requests)",
+          "legendFormat": "HTTP Active Req (Replica {{replica}})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "gRPC In-Flight Calls by Replica",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": "Prometheus",
+      "description": "Currently in-flight active gRPC calls on each replica.",
+      "targets": [
+        {
+          "expr": "sum by (replica) (grpc_in_flight_calls)",
+          "legendFormat": "gRPC In-Flight (Replica {{replica}})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "HTTP Latency p50 & p95 by Replica (1m window)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": "Prometheus",
+      "description": "Server-side HTTP response latency p50 and p95 per replica.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, replica) (rate(http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p50 Replica {{replica}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, replica) (rate(http_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 Replica {{replica}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "gRPC Latency p50 & p95 by Replica (1m window)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": "Prometheus",
+      "description": "Server-side gRPC response latency p50 and p95 per replica.",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le, replica) (rate(grpc_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p50 Replica {{replica}}",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, replica) (rate(grpc_request_duration_seconds_bucket[1m])))",
+          "legendFormat": "p95 Replica {{replica}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "HTTP Errors by Status & Replica",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": "Prometheus",
+      "description": "Non-2xx HTTP errors by status code and replica.",
+      "targets": [
+        {
+          "expr": "sum by (replica, status) (rate(http_request_duration_seconds_count{status!~\"2..\"}[1m]))",
+          "legendFormat": "Replica {{replica}} - HTTP {{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "req/s" },
+        "overrides": []
+      }
+    },
+    {
+      "title": "gRPC Errors by Status & Replica",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": "Prometheus",
+      "description": "Non-OK gRPC failures by status name and replica.",
+      "targets": [
+        {
+          "expr": "sum by (replica, status) (rate(grpc_calls_total{status!=\"OK\"}[1m]))",
+          "legendFormat": "Replica {{replica}} - gRPC {{status}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "req/s" },
+        "overrides": []
+      }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["cristaux", "assignment3", "envoy", "replicas"],
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m"]
+  },
+  "timezone": "browser",
+  "title": "Cristaux - Assignment 3: Envoy & Replicas Baseline",
+  "uid": "cristaux-a3-replicas"
+}

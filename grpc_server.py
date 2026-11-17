@@ -9,6 +9,7 @@ Part B: gRPC Service implementation for Order lifecycle management.
 
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -31,6 +32,8 @@ from app.orders_repository import (
 # Structured JSON Logging Setup (Preserving Assignment 1 Logging Schema)
 # --------------------------------------------------------------------------
 SERVICE_NAME = "Cristaux Jewellery gRPC Service"
+REPLICA_ID = os.getenv("REPLICA_ID", "unknown")
+FAULT_DELAY_MS = float(os.getenv("FAULT_DELAY_MS", "0.0"))
 
 
 class JsonFormatter(logging.Formatter):
@@ -41,6 +44,7 @@ class JsonFormatter(logging.Formatter):
             )
             + f".{int(record.msecs):03d}Z",
             "service": SERVICE_NAME,
+            "replica_id": REPLICA_ID,
             "level": record.levelname,
             "message": record.getMessage(),
         }
@@ -135,6 +139,9 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
         rpc_method = "CancelOrder"
         status = "OK"
 
+        if FAULT_DELAY_MS > 0:
+            time.sleep(FAULT_DELAY_MS / 1000.0)
+
         GRPC_IN_FLIGHT_CALLS.labels(rpc_method=rpc_method).inc()
         try:
             logger.info(
@@ -145,6 +152,7 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
                         "rpc": "CancelOrder",
                         "order_id": request.order_id,
                         "reason": reason,
+                        "replica_id": REPLICA_ID,
                     }
                 },
             )
@@ -164,6 +172,7 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
                             "order_id": request.order_id,
                             "status_code": "NOT_FOUND",
                             "duration_ms": duration_ms,
+                            "replica_id": REPLICA_ID,
                         }
                     },
                 )
@@ -183,6 +192,7 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
                             "order_id": request.order_id,
                             "status_code": "FAILED_PRECONDITION",
                             "duration_ms": duration_ms,
+                            "replica_id": REPLICA_ID,
                         }
                     },
                 )
@@ -202,6 +212,7 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
                             "order_id": request.order_id,
                             "status_code": "FAILED_PRECONDITION",
                             "duration_ms": duration_ms,
+                            "replica_id": REPLICA_ID,
                         }
                     },
                 )
@@ -220,6 +231,7 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
                         "order_id": request.order_id,
                         "status_code": "OK",
                         "duration_ms": duration_ms,
+                        "replica_id": REPLICA_ID,
                     }
                 },
             )
@@ -250,6 +262,9 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
         rpc_method = "GetOrder"
         status = "OK"
 
+        if FAULT_DELAY_MS > 0:
+            time.sleep(FAULT_DELAY_MS / 1000.0)
+
         GRPC_IN_FLIGHT_CALLS.labels(rpc_method=rpc_method).inc()
         try:
             order = db_get_order(request.order_id)
@@ -266,6 +281,7 @@ class OrderServiceServicer(order_service_pb2_grpc.OrderServiceServicer):
                             "order_id": request.order_id,
                             "status_code": "NOT_FOUND",
                             "duration_ms": duration_ms,
+                            "replica_id": REPLICA_ID,
                         }
                     },
                 )
