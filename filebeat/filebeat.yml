@@ -3,36 +3,44 @@ filebeat.inputs:
     enabled: true
     paths:
       - /var/lib/docker/containers/*/*.log
-    # Collect both streams: some app loggers (e.g. uvicorn/python logging)
-    # write to stderr, and you'd silently lose those events.
     stream: all
 
 processors:
-  # Attach container name, image, and labels to every event.
   - add_docker_metadata:
       host: "unix:///var/run/docker.sock"
 
-  # Keep logs only from app-a/b/c, grpc-a/b/c and envoy.
   - drop_event:
       when:
         not:
           regexp:
             container.name: "(app-[abc]|grpc-[abc]|envoy)"
 
-  # Drop non-JSON lines (Envoy startup text, etc.)
   - drop_event:
       when:
         not:
           regexp:
             message: "^\\s*\\{"
 
-  # Decode JSON into its own namespace so app fields (including `service`)
-  # can never collide with ECS fields like service.name.
   - decode_json_fields:
       fields: ["message"]
       target: "log_json"
       overwrite_keys: false
       add_error_key: true
+
+  # gRPC logs put a status NAME (OK, NOT_FOUND) in status_code, but HTTP logs
+  # put a NUMBER there. Move string values to their own field so the index
+  # mapping (long) never sees a string.
+  - script:
+      lang: javascript
+      id: split_grpc_status
+      source: |
+        function process(event) {
+          var s = event.Get("log_json.status_code");
+          if (typeof s === "string") {
+            event.Put("log_json.grpc_status", s);
+            event.Delete("log_json.status_code");
+          }
+        }
 
 output.elasticsearch:
   hosts: ["http://elasticsearch:9200"]
@@ -42,5 +50,5 @@ setup.ilm.enabled: false
 setup.template.name: "app-logs"
 setup.template.pattern: "app-logs-*"
 
-logging.level: debug
-logging.selectors: ["elasticsearch"]
+logging.level: info
+logging.to_files: false

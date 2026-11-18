@@ -1,208 +1,233 @@
 """
-traffic_a3.py — Fixed-rate traffic generator for Assignment 3.
+traffic_a3.py - Fixed-rate traffic generator for Assignment 3.
 
-Sends HTTP GET /api/v1/products to Envoy HTTP port (8080) and
-gRPC GetOrder calls to Envoy gRPC port (50050) at a fixed rate
-without waiting for prior responses before dispatching the next request.
+Sends HTTP GET /api/v1/products to Envoy (:8080) and unary gRPC GetOrder
+calls to Envoy (:50050) at a fixed rate, without waiting for earlier
+responses before dispatching the next request (open-loop).
+
+The gRPC order must EXIST, otherwise every call returns NOT_FOUND and the
+run measures the error path. Pass a real ID with --grpc-order-id.
 
 Usage:
-    py -3 traffic_a3.py [--http-rate N] [--grpc-rate N] [--duration S]
+    py -3 traffic_a3.py --grpc-order-id <ID> [--http-rate 5] [--grpc-rate 2]
+                        [--duration 60] [--label part-b-baseline]
+
+Counting rules:
+    Sent    = requests dispatched during the timed window
+    Success = HTTP status < 400, gRPC status OK
+    Fail    = anything else (including gRPC NOT_FOUND, timeouts, 5xx)
 """
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+import csv
+import os
+import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import grpc
 import requests
+from requests.adapters import HTTPAdapter
 
 from proto import order_service_pb2, order_service_pb2_grpc
 
-# ---------------------------------------------------------------------------
-# Statistics tracking (guarded by lock)
-# ---------------------------------------------------------------------------
+HTTP_URL = "http://localhost:8080/api/v1/products"
+GRPC_TARGET = "localhost:50050"
+
 _lock = threading.Lock()
-
-http_sent = 0
-http_success = 0
-http_failure = 0
-http_latencies: list[float] = []
-
-grpc_sent = 0
-grpc_success = 0
-grpc_failure = 0
-grpc_latencies: list[float] = []
-
 _stop_event = threading.Event()
 
 
-def p95(values: list[float]) -> float:
+class Stats:
+    def __init__(self) -> None:
+        self.dispatched = 0
+        self.success = 0
+        self.failure = 0
+        self.latencies: list[float] = []
+        self.errors: dict[str, int] = {}
+
+    def record(self, ok: bool, latency: float, err: str = "") -> None:
+        with _lock:
+            if ok:
+                self.success += 1
+            else:
+                self.failure += 1
+                self.errors[err] = self.errors.get(err, 0) + 1
+            self.latencies.append(latency)
+
+
+http_stats = Stats()
+grpc_stats = Stats()
+
+
+def percentile(values: list[float], q: float) -> float:
+    """Nearest-rank percentile."""
     if not values:
         return 0.0
-    sorted_vals = sorted(values)
-    idx = int(len(sorted_vals) * 0.95)
-    idx = min(idx, len(sorted_vals) - 1)
-    return sorted_vals[idx]
+    s = sorted(values)
+    rank = max(1, int(round(q * len(s) + 0.5)))
+    return s[min(rank, len(s)) - 1]
+
+
+def new_ids() -> dict[str, str]:
+    trace_id = uuid.uuid4().hex  # 32 hex chars
+    return {"x-request-id": str(uuid.uuid4()), "x-trace-id": trace_id}
 
 
 # ---------------------------------------------------------------------------
-# Request dispatchers
+# Single requests
 # ---------------------------------------------------------------------------
 
-def send_one_http(url: str, session: requests.Session) -> None:
-    global http_sent, http_success, http_failure
-    req_id = str(uuid.uuid4())
+def send_one_http(session: requests.Session, stats: Stats | None) -> None:
     t0 = time.perf_counter()
     try:
-        resp = session.get(
-            url,
-            headers={"x-request-id": req_id},
-            timeout=5.0,
-        )
-        latency = time.perf_counter() - t0
-        with _lock:
-            http_sent += 1
-            http_latencies.append(latency)
-            if resp.status_code < 400:
-                http_success += 1
-            else:
-                http_failure += 1
-    except Exception:
-        latency = time.perf_counter() - t0
-        with _lock:
-            http_sent += 1
-            http_failure += 1
-            http_latencies.append(latency)
+        resp = session.get(HTTP_URL, headers=new_ids(), timeout=5.0)
+        ok = resp.status_code < 400
+        err = "" if ok else f"HTTP {resp.status_code}"
+    except Exception as exc:
+        ok, err = False, type(exc).__name__
+    if stats is not None:
+        stats.record(ok, time.perf_counter() - t0, err)
 
 
-def send_one_grpc(stub: order_service_pb2_grpc.OrderServiceStub) -> None:
-    global grpc_sent, grpc_success, grpc_failure
-    req_id = str(uuid.uuid4())
+def send_one_grpc(stub, order_id: str, stats: Stats | None) -> None:
     t0 = time.perf_counter()
     try:
         stub.GetOrder(
-            order_service_pb2.GetOrderRequest(order_id="nonexistent-order-a3"),
-            metadata=[("x-request-id", req_id)],
+            order_service_pb2.GetOrderRequest(order_id=order_id),
+            metadata=list(new_ids().items()),
             timeout=5.0,
         )
-        latency = time.perf_counter() - t0
-        with _lock:
-            grpc_sent += 1
-            grpc_success += 1
-            grpc_latencies.append(latency)
+        ok, err = True, ""
     except grpc.RpcError as exc:
-        latency = time.perf_counter() - t0
-        with _lock:
-            grpc_sent += 1
-            grpc_latencies.append(latency)
-            # NOT_FOUND (5) is an expected valid response for a non-existent order
-            if exc.code() == grpc.StatusCode.NOT_FOUND:
-                grpc_success += 1
-            else:
-                grpc_failure += 1
-    except Exception:
-        latency = time.perf_counter() - t0
-        with _lock:
-            grpc_sent += 1
-            grpc_failure += 1
-            grpc_latencies.append(latency)
+        ok, err = False, f"gRPC {exc.code().name}"
+    except Exception as exc:
+        ok, err = False, type(exc).__name__
+    if stats is not None:
+        stats.record(ok, time.perf_counter() - t0, err)
 
 
 # ---------------------------------------------------------------------------
-# Fixed-rate schedulers (dispatch without waiting for prior responses)
+# Fixed-rate schedulers
 # ---------------------------------------------------------------------------
 
-def run_http_scheduler(rate: float, pool: ThreadPoolExecutor) -> None:
-    interval = 1.0 / rate if rate > 0 else 1.0
-    url = "http://localhost:8080/api/v1/products"
-    session = requests.Session()
-
+def schedule(rate: float, stats: Stats, submit_fn) -> None:
+    interval = 1.0 / rate
     next_time = time.perf_counter()
     while not _stop_event.is_set():
-        pool.submit(send_one_http, url, session)
+        with _lock:
+            stats.dispatched += 1
+        submit_fn()
         next_time += interval
-        sleep_dur = next_time - time.perf_counter()
-        if sleep_dur > 0:
-            _stop_event.wait(timeout=sleep_dur)
+        delay = next_time - time.perf_counter()
+        if delay > 0:
+            _stop_event.wait(timeout=delay)
         else:
-            # Caught up if lagging
-            next_time = time.perf_counter()
+            next_time = time.perf_counter()  # lagging: do not burst
 
-
-def run_grpc_scheduler(rate: float, pool: ThreadPoolExecutor) -> None:
-    interval = 1.0 / rate if rate > 0 else 1.0
-    channel = grpc.insecure_channel("localhost:50050")
-    stub = order_service_pb2_grpc.OrderServiceStub(channel)
-
-    next_time = time.perf_counter()
-    while not _stop_event.is_set():
-        pool.submit(send_one_grpc, stub)
-        next_time += interval
-        sleep_dur = next_time - time.perf_counter()
-        if sleep_dur > 0:
-            _stop_event.wait(timeout=sleep_dur)
-        else:
-            next_time = time.perf_counter()
-
-    channel.close()
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Assignment 3 Part A/B fixed-rate workload generator")
-    parser.add_argument("--http-rate", type=float, default=5.0,
-                        help="HTTP requests per second dispatched to Envoy :8080 (default: 5.0)")
-    parser.add_argument("--grpc-rate", type=float, default=2.0,
-                        help="gRPC calls per second dispatched to Envoy :50050 (default: 2.0)")
-    parser.add_argument("--duration", type=float, default=30.0,
-                        help="Benchmark duration in seconds (default: 30.0)")
-    args = parser.parse_args()
+    p = argparse.ArgumentParser(description="Assignment 3 fixed-rate workload")
+    p.add_argument("--http-rate", type=float, default=5.0)
+    p.add_argument("--grpc-rate", type=float, default=2.0)
+    p.add_argument("--duration", type=float, default=60.0)
+    p.add_argument("--grpc-order-id", required=True,
+                   help="ID of an order that EXISTS (otherwise all calls are NOT_FOUND)")
+    p.add_argument("--warmup", type=float, default=3.0,
+                   help="seconds of untimed, unrecorded traffic first (default 3)")
+    p.add_argument("--label", default="",
+                   help="run name; appends one row per interface to results.csv")
+    args = p.parse_args()
+
+    pool = ThreadPoolExecutor(max_workers=64)
+
+    session = requests.Session()
+    session.mount("http://", HTTPAdapter(pool_connections=4, pool_maxsize=64))
+    channel = grpc.insecure_channel(GRPC_TARGET)  # one connection, as in the brief
+    stub = order_service_pb2_grpc.OrderServiceStub(channel)
+
+    # Fail fast if the order does not exist.
+    try:
+        stub.GetOrder(order_service_pb2.GetOrderRequest(order_id=args.grpc_order_id),
+                      timeout=5.0)
+    except grpc.RpcError as exc:
+        print(f"ERROR: GetOrder('{args.grpc_order_id}') returned {exc.code().name}. "
+              "Use an order ID that exists.", file=sys.stderr)
+        sys.exit(2)
 
     print("=" * 64)
-    print(" CRISTAUX JEWELLERY — Assignment 3 Workload Generator")
-    print(f" Target: Envoy Proxy (HTTP :8080, gRPC :50050)")
-    print(f" Config: http-rate={args.http_rate} rps | grpc-rate={args.grpc_rate} rps | duration={args.duration}s")
-    print(" Dispatching at fixed rate without waiting for response...")
+    print(" CRISTAUX JEWELLERY - Assignment 3 Workload Generator")
+    print(f" Target: Envoy (HTTP :8080, gRPC :50050)  label='{args.label}'")
+    print(f" Config: http={args.http_rate} rps | grpc={args.grpc_rate} rps | "
+          f"duration={args.duration}s | warmup={args.warmup}s")
     print("=" * 64)
 
-    pool = ThreadPoolExecutor(max_workers=32)
+    # Warm-up: connection setup and first-call cost are excluded.
+    end_warm = time.perf_counter() + args.warmup
+    while time.perf_counter() < end_warm:
+        pool.submit(send_one_http, session, None)
+        pool.submit(send_one_grpc, stub, args.grpc_order_id, None)
+        time.sleep(0.2)
 
-    t_http = threading.Thread(target=run_http_scheduler, args=(args.http_rate, pool), daemon=True)
-    t_grpc = threading.Thread(target=run_grpc_scheduler, args=(args.grpc_rate, pool), daemon=True)
+    start = datetime.now(timezone.utc)
+    t_start = time.perf_counter()
 
-    t_http.start()
-    t_grpc.start()
+    threads = [
+        threading.Thread(target=schedule, daemon=True, args=(
+            args.http_rate, http_stats,
+            lambda: pool.submit(send_one_http, session, http_stats))),
+        threading.Thread(target=schedule, daemon=True, args=(
+            args.grpc_rate, grpc_stats,
+            lambda: pool.submit(send_one_grpc, stub, args.grpc_order_id, grpc_stats))),
+    ]
+    for t in threads:
+        t.start()
 
     time.sleep(args.duration)
     _stop_event.set()
+    elapsed = time.perf_counter() - t_start
+    end = datetime.now(timezone.utc)
+    for t in threads:
+        t.join(timeout=5)
+    pool.shutdown(wait=True)  # let in-flight requests finish
+    channel.close()
 
-    t_http.join(timeout=5)
-    t_grpc.join(timeout=5)
-    pool.shutdown(wait=True)
-
-    with _lock:
-        h_sent = http_sent
-        h_ok = http_success
-        h_fail = http_failure
-        h_p95 = p95(http_latencies) * 1000
-
-        g_sent = grpc_sent
-        g_ok = grpc_success
-        g_fail = grpc_failure
-        g_p95 = p95(grpc_latencies) * 1000
-
+    rows = []
     print()
     print("=" * 64)
     print(" WORKLOAD RESULTS SUMMARY")
+    print(f" Window (UTC): {start:%H:%M:%S} -> {end:%H:%M:%S}  ({elapsed:.1f}s)")
     print("=" * 64)
-    print(f" HTTP  | Rate: {args.http_rate:.1f} rps | Sent: {h_sent:4d} | Success: {h_ok:4d} | Fail: {h_fail:4d} | Client p95: {h_p95:6.2f} ms")
-    print(f" gRPC  | Rate: {args.grpc_rate:.1f} rps | Sent: {g_sent:4d} | Success: {g_ok:4d} | Fail: {g_fail:4d} | Client p95: {g_p95:6.2f} ms")
+    for name, rate, st in (("HTTP", args.http_rate, http_stats),
+                           ("gRPC", args.grpc_rate, grpc_stats)):
+        actual = st.dispatched / elapsed if elapsed else 0.0
+        p50 = percentile(st.latencies, 0.50) * 1000
+        p95 = percentile(st.latencies, 0.95) * 1000
+        err_rate = 100.0 * st.failure / st.dispatched if st.dispatched else 0.0
+        print(f" {name} | target {rate:.1f} / actual {actual:.2f} rps | "
+              f"Sent {st.dispatched} | OK {st.success} | Fail {st.failure} "
+              f"({err_rate:.1f}%) | p50 {p50:.1f} ms | p95 {p95:.1f} ms")
+        if st.errors:
+            print(f"      errors: {st.errors}")
+        rows.append([args.label, name, rate, f"{actual:.2f}", st.dispatched,
+                     st.success, st.failure, f"{err_rate:.2f}",
+                     f"{p50:.2f}", f"{p95:.2f}",
+                     start.isoformat(timespec="seconds"),
+                     end.isoformat(timespec="seconds")])
     print("=" * 64)
+
+    if args.label:
+        new_file = not os.path.exists("results.csv")
+        with open("results.csv", "a", newline="") as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(["label", "interface", "target_rps", "actual_rps",
+                            "sent", "success", "fail", "error_pct",
+                            "p50_ms", "p95_ms", "start_utc", "end_utc"])
+            w.writerows(rows)
 
 
 if __name__ == "__main__":
